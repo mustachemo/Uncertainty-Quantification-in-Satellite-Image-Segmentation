@@ -1,0 +1,5 @@
+checkpoints/
+data/
+preppped_data/
+logs/
+venv/

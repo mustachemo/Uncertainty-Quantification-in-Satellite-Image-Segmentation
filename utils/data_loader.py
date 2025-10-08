@@ -1,81 +1,84 @@
-import tensorflow as tf
-from tensorflow.keras.utils import load_img # type: ignore
+import torch
+import cv2
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-from configs import X_DIMENSION, Y_DIMENSION, BATCH_SIZE, BUFFER_SIZE, MIXED_PRECISION
 import logging
+import numpy as np
+from pathlib import Path
 
-def process_image(image_path, mask_path, image_color_mode='rgb', mask_color_mode='grayscale', make_mask_binary=True):
+# It's better to pass config values as arguments, but for now I'll import them to keep changes minimal
+from configs import X_DIMENSION, Y_DIMENSION, BATCH_SIZE, MIXED_PRECISION
+
+def process_image(image_path, mask_path, make_mask_binary=True):
     try:
-        image = load_img(image_path, color_mode=image_color_mode, target_size=(X_DIMENSION, Y_DIMENSION))
-        mask = load_img(mask_path, color_mode=mask_color_mode, target_size=(X_DIMENSION, Y_DIMENSION))
-        
-        image = tf.convert_to_tensor(image, dtype=tf.uint8)
-        mask = tf.convert_to_tensor(mask, dtype=tf.uint8)
-        mask = tf.expand_dims(mask, axis=-1)
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)  # Grayscale
+
+        if image is None or mask is None:
+            logging.warning(f"Could not read image or mask for {image_path}")
+            return None, None
+
+        image = cv2.resize(image, (X_DIMENSION, Y_DIMENSION), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (X_DIMENSION, Y_DIMENSION), interpolation=cv2.INTER_LINEAR)
+
+        # from HWC to CHW for PyTorch
+        image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        mask = torch.from_numpy(mask).unsqueeze(0).float() / 255.0
+
         if make_mask_binary:
-            mask = tf.cast(mask > 0, tf.uint8)
+            mask = (mask > 0.5).type(torch.uint8)
 
         return image, mask
     except Exception as e:
-        logging.warn(f'Image or mask not found: {image_path}, {mask_path}')
+        logging.error(f"Error processing {image_path}: {e}")
         return None, None
 
-
-def load_and_process_files(image_dir, mask_dir, prefix='train'):
+def load_and_process_files(image_dir, mask_dir, prefix="train"):
     images = []
     masks = []
-    image_paths = list(image_dir.glob('*.png'))
+    image_paths = list(Path(image_dir).glob("*.png"))
 
     with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(process_image, image_path, mask_dir / f'{image_path.stem}_mask.png'): image_path for image_path in image_paths}
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc=f'Loading and processing {prefix} data'):
+        # Create mask paths corresponding to image paths
+        mask_paths = [Path(mask_dir) / f"{p.stem}_mask.png" for p in image_paths]
+        futures = {executor.submit(process_image, ip, mp): ip for ip, mp in zip(image_paths, mask_paths)}
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Loading and processing {prefix} data"):
             image, mask = future.result()
             if image is not None and mask is not None:
                 images.append(image)
                 masks.append(mask)
-                
+
     return images, masks
 
-def serialize_example(image, mask):
-    image_value = tf.io.encode_png(image).numpy()
-    mask_value = tf.io.encode_png(mask).numpy()
+def save_preprocessed_data(directory, images, masks, prefix="train"):
+    """Saves images and masks as individual .pt files in the specified directory."""
+    os.makedirs(directory, exist_ok=True)
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(torch.save, (image, mask), os.path.join(directory, f"datapoint_{i}.pt"))
+                   for i, (image, mask) in enumerate(zip(images, masks))]
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Saving preprocessed {prefix} data"):
+            future.result()
+
+class PreprocessedDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir):
+        self.data_dir = Path(data_dir)
+        self.file_list = sorted(list(self.data_dir.glob("*.pt")))
+
+    def __len__(self):
+        return len(self.file_list)
     
-    feature = {
-        'image': tf.train.Feature(bytes_list=tf.train.BytesList(value=[image_value])),
-        'mask': tf.train.Feature(bytes_list=tf.train.BytesList(value=[mask_value])),
-    }
-    return tf.train.Example(features=tf.train.Features(feature=feature)).SerializeToString()
+    def __getitem__(self, idx):
+        filepath = self.file_list[idx]
+        image, mask = torch.load(filepath)
+        if MIXED_PRECISION:
+            image = image.half()
+        # The combined_loss function expects a float tensor for y_true for BCEWithLogitsLoss
+        return image, mask.float()
 
-def write_tfrecord(filename, images, masks):
-    with tf.io.TFRecordWriter(filename) as writer:
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(serialize_example, image, mask) for image, mask in zip(images, masks)]
-            for future in tqdm(as_completed(futures), total=len(futures), desc='Writing TFRecord'):
-                example = future.result()
-                writer.write(example)
-
-def read_tfrecord(serialized_example):
-    '''Read a single example from a TFRecord file and decode it'''
-    
-    feature_description = {
-        'image': tf.io.FixedLenFeature([], tf.string),
-        'mask': tf.io.FixedLenFeature([], tf.string),
-    }
-    example = tf.io.parse_single_example(serialized_example, feature_description)
-    image = tf.io.decode_png(example['image'])
-    mask = tf.io.decode_png(example['mask'])
-    dtype = tf.float16 if MIXED_PRECISION else tf.float32
-    image = tf.cast(image, dtype) / 255.0
-    mask = tf.cast(mask, dtype)
-    return image, mask
-
-def create_tf_dataset_from_tfrecord(tfrecord_files):
-    '''Create a TFRecord dataset from a list of TFRecord files'''
-    raw_dataset = tf.data.TFRecordDataset(tfrecord_files)
-    logging.info(f'Creted dataset from {tfrecord_files} with batch size {BATCH_SIZE}...')
-    logging.info('Normalized Images but not masks, as they are binary')
-    dataset = raw_dataset.map(read_tfrecord, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.shuffle(buffer_size=BUFFER_SIZE).batch(BATCH_SIZE).repeat().prefetch(buffer_size=tf.data.AUTOTUNE)
-    return dataset
+def create_pytorch_dataloader(data_dir, batch_size=BATCH_SIZE, shuffle=True):
+    dataset = PreprocessedDataset(data_dir)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=os.cpu_count()//2 if os.cpu_count() else 0, pin_memory=True)
+    return dataloader

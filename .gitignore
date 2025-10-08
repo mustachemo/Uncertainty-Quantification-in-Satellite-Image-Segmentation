@@ -1,3 +1,16 @@
+*.pyc
+data/
+__pycache__/
+checkpoints/
+*.pth
+*.jpg
+venv/
+.idea/
+wandb/
+
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -162,3 +175,7 @@ logs/*
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+
+# extra
+report/

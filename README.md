@@ -7,6 +7,8 @@ This repository contains experiments and implementations for uncertainty quantif
   - [Primary Files:](#primary-files)
   - [Directory Structure:](#directory-structure)
   - [Running the experiments:](#running-the-experiments)
+    - [Without docker](#without-docker)
+    - [With docker](#with-docker)
 - [Satellite Dataset](#satellite-dataset)
 - [Information](#information)
   - [Improvements](#improvements)
@@ -14,14 +16,15 @@ This repository contains experiments and implementations for uncertainty quantif
   - [Dataset:](#dataset)
   - [MC Dropout](#mc-dropout)
   - [Further UQ in Deep Learning](#further-uq-in-deep-learning)
+  - [Packages](#packages)
 
 ## Installation
 
 Clone the repository:
 
 ```bash
-git clone https://github.com/mustachemo/Satellite-Image-Segmentation.git
-cd Satellite-Image-Segmentation
+git clone https://github.com/mustachemo/Turion-Space-assessment.git
+cd Turion-Space-assessment
 ```
 
 Install the dependencies:
@@ -52,6 +55,8 @@ pip install -r requirements.txt
 
 ### Running the experiments:
 
+#### Without docker
+
 1. Download the dataset from [here](https://github.com/Yurushia1998/SatelliteDataset)
 2. Place the dataset (all files you download from the drive folder) in the `data/` directory.
 3. Run `train.py` to train the model (The prepped data used for the training will be automatically generated and saved in the `prepped_data/` directory when running the training script).
@@ -64,6 +69,28 @@ python train.py
 python predict.py
 python main.py
 ```
+
+#### With docker
+
+1. Build the docker image:
+
+```bash
+sudo docker build -t satellite-unet .
+```
+
+2.1 Run the docker container:
+
+```bash
+sudo docker run --rm --shm-size=8g --ulimit memlock=-1 --gpus all -it -v $(pwd)/prepped_data:/workspace satellite-unet
+```
+
+- remove `--gpus all` if you don't have a GPU.
+
+2.2 Run the docker container with docker-compose:
+
+  ```bash
+  sudo docker-compose up
+  ```
 
 ## Satellite Dataset
 
@@ -104,3 +131,7 @@ The satellite dataset is primarly for object detection and segmentation using bo
 ### Further UQ in Deep Learning
 
 - [A review of uncertainty quantification in deep learning: Techniques, applications and challenges](https://www.sciencedirect.com/science/article/pii/S1566253521001081).
+
+### Packages
+
+- [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)

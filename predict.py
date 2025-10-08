@@ -1,49 +1,65 @@
-import tensorflow as tf
+import torch
+from pathlib import Path
+import numpy as np
 
+from model.unet_model import UNet
 from utils.checker import check_dirs, check_prepped_data
-from utils.custom_funcs import dice_loss, dice_coefficient, combined_loss
-from utils.visualize import visaulize_prediction
+from utils.visualize import visualize_prediction
 from utils.logger_prep import get_logger
-from configs import DROPOUT_RATE, ACTIVATION_FUNC
+from configs import *
 
-def prediction_for_single_model(test_dataset, activation_fun=ACTIVATION_FUNC):
-    # Load the model
-    try: 
-        model = tf.keras.models.load_model(f'checkpoints/unet_model_{DROPOUT_RATE}_{activation_fun}.h5', custom_objects={'dice_loss': dice_loss, 'dice_coefficient': dice_coefficient, 'combined_loss': combined_loss})
-        logger.info('Model loaded successfully')
-    except Exception as e:
-        logger.error(f'Model not found, please train the model first: {e}')
-        exit()
+logger = get_logger(__name__)
 
-    # Predict and show results
-    logger.info(f'Getting predictions for {len(test_dataset)} test samples')
-    predictions = model.predict(test_dataset)
-    
-    # apply sigmoid to the predictions
-    # predictions = tf.nn.sigmoid(predictions)
-    
-    for i in range(50, 60):
-        visaulize_prediction(test_dataset[i][0], test_dataset[i][1], predictions[i])
+def predict_single_model(test_loader, device):
+    """
+    Loads a trained model, makes predictions on a few samples from the test set,
+    and visualizes the results.
+    """
+    # Initialize model
+    model = UNet(n_channels=N_CHANNELS, n_classes=N_CLASSES, bilinear=False).to(device)
 
-    # Evaluate the model
-    logger.info('Evaluating model')
-    loss, accuracy, dice_coefficient_metric = model.evaluate(test_dataset)
-    logger.info(f'Loss: {round(loss, 3)}, Accuracy: {round(accuracy, 3)}, Dice Coefficient: {round(dice_coefficient_metric, 3)}')
-    
-    logger.info('Predictions complete')
+    # Load the trained model
+    model_path = Path(f"checkpoints/unet_model_{DROPOUT_RATE}_{ACTIVATION_FUNC}.pth")
+    if not model_path.exists():
+        logger.error(f"Model checkpoint not found at {model_path}. Please train the model first.")
+        return
 
-if __name__ == '__main__':
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    logger.info(f"Model loaded from {model_path}")
 
+    logger.info("Visualizing predictions for a few test samples...")
+    with torch.no_grad():
+        # Get a few samples to visualize
+        for i, (images, masks) in enumerate(test_loader):
+            if i >= 5: # Visualize 5 samples
+                break
+
+            images, masks = images.to(device), masks.to(device)
+
+            # Get model prediction
+            outputs = model(images)
+
+            # The output is in logits. Use sigmoid to get probabilities and threshold to get binary mask.
+            preds = torch.sigmoid(outputs) > 0.5
+
+            # Visualize the first image in the batch
+            visualize_prediction(
+                images[0],
+                masks[0],
+                preds[0]
+            )
+
+    logger.info("Prediction visualization complete.")
+
+if __name__ == "__main__":
     check_dirs()
-    dataset = check_prepped_data(get_train=False, get_test=True)
-    logger = get_logger(__name__)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
 
-    # Predict for a single model
-    prediction_for_single_model(dataset['test'])
+    # Load test data
+    # Set shuffle=False to get consistent samples for visualization
+    dataloaders = check_prepped_data(get_train=False, get_test=True)
 
-    # Predict for multiple models
-    # activation_funcs = ['relu', 'elu', 'swish', 'gelu', 'leaky_relu']
-    # for activation_func in activation_funcs:
-    #     prediction_for_single_model(test_images, test_masks, activation_func)
-    #     logger.info(f'Prediction complete for model with activation function: {activation_func}')
+    predict_single_model(dataloaders["test"], device)
